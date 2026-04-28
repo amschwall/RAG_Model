@@ -11,6 +11,7 @@ from tqdm import tqdm
 from gensim.models import Word2Vec
 from transformers import AutoTokenizer, T5ForConditionalGeneration, AutoModelForCausalLM, AutoTokenizer
 import torch
+from codebleu import calc_codebleu
 
 
 # Skip-gram embedding model
@@ -182,6 +183,48 @@ def generate_code(prompt, tokenizer, model, num_samples=1, max_new_tokens=512, t
 
     return generations
 
+# RAG generation for test set
+def rag_generate(buggy_code, retriever, tokenizer, model, top_k=3):
+    retrieved = retriever.retrieve(buggy_code, top_k=top_k)
+    context = build_rag_context(retrieved)
+    prompt = build_prompt(buggy_code, tokenizer, context)
+    output = generate_code(prompt, tokenizer, model, num_samples=1)[0]
+    return output
+
+#Evaluation functions
+def exact_match(pred, gold):
+    return pred.strip() == gold.strip()
+
+def evaluate_model(dataset, generator_fn):
+    preds = []
+    refs = []
+
+    for ex in tqdm(dataset):
+        buggy = ex["buggy"]
+        fixed = ex["fixed"]
+
+        pred = generator_fn(buggy)
+        preds.append(pred)
+        refs.append(fixed)
+
+    # Exact match
+    em = np.mean([exact_match(p, r) for p, r in zip(preds, refs)])
+
+    # CodeBLEU
+    codebleu = calc_codebleu(
+        refs,
+        preds,
+        lang="java"
+    )["codebleu"]
+
+    return em, codebleu, preds
+
+def zero_shot_generate(buggy_code, tokenizer, model):
+    prompt = build_prompt(buggy_code, tokenizer, rag_context="")
+    output = generate_code(prompt, tokenizer, model, num_samples=1)[0]
+
+    return output
+
 def main():
     # paths
     dataset = load_dataset("google/code_x_glue_cc_code_refinement", name="medium")
@@ -196,24 +239,33 @@ def main():
     print("\nfixed:\n", example['fixed'][:300], "...")
 
     print("Imports complete")
+    # Train Word2Vec and generate embeddings
+    # Build corpus for training the embedder
+    train_split = dataset["train"]
+
+    code_corpus = [ex["buggy"] for ex in train_split] + [ex["fixed"] for ex in train_split]
+
+    embed_texts = [ex["buggy"] for ex in train_split]
 
     # Process data for knowledge base
     print("processing java...")
-    java_data = [process_codexglue_example(ex) for ex in tqdm(dataset['train'])]
+    java_data = []
+    for ex in tqdm(train_split):
+        java_data.append({
+            "buggy": ex["buggy"],
+            "fixed": ex["fixed"],
+            "embed_text": ex["buggy"]
+        })
+
     print(f"Methods: {len(java_data)} examples")
 
-    # Train Word2Vec and generate embeddings
-    # Build corpus for training the embedder
-    code_corpus = [item['buggy'] for item in dataset] + [item['fixed'] for item in dataset]
-
-    embed_texts = [item['embed_text'] for item in dataset]
 
     # Train embedder
     embedder = CodeEmbedder(vector_size=128, window=5, min_count=2)
     embedder.train(code_corpus + embed_texts)
 
     # Encode the entire KB (Java only)
-    embeddings = embedder.encode([item['embed_text'] for item in dataset])
+    embeddings = embedder.encode([item['embed_text'] for item in java_data])
 
     print(f"embeddings: {embeddings.shape}")
 
@@ -259,13 +311,13 @@ def main():
     java_query = "Sort an array of integers in ascending order\npublic void sortArray(int[] arr)"
     print(f"query: {java_query}\n")
 
-    java_results = w2v_retriever.retrieve(java_query, language='java', top_k=3)
+    java_results = w2v_retriever.retrieve(java_query, top_k=3)
 
     print(f"retrieved {len(java_results)} java examples:")
     for i, r in enumerate(java_results, 1):
         print(f"\n  {i}. similarity: {r['similarity']:.4f}")
-        print(f"     summary: {r['summary'][:80]}...")
-        print(f"     signature: {r['signature'][:60]}...")
+        print(f"     buggy: {r['buggy'][:80]}...")
+        print(f"     fixed: {r['fixed'][:60]}...")
 
     # Load generator model
     MODEL_NAME = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
@@ -282,6 +334,36 @@ def main():
     tokenizer.padding_side = "left"
 
     print(f"loaded {MODEL_NAME} on {model.device}")
+
+    # Evaluate RAG model
+    test_split = dataset["test"]
+
+    print("\nRunning RAG evaluation...")
+    rag_em, rag_codebleu, rag_preds = evaluate_model(
+        test_split,
+        lambda buggy: rag_generate(buggy, w2v_retriever, tokenizer, model)
+    )
+
+    print("\nRunning zero-shot evaluation...")
+    zs_em, zs_codebleu, zs_preds = evaluate_model(
+        test_split,
+        lambda buggy: zero_shot_generate(buggy, tokenizer, model)
+    )
+
+    print("\n=== RESULTS ===")
+    print(f"RAG Exact Match: {rag_em:.4f}")
+    print(f"RAG CodeBLEU:    {rag_codebleu:.4f}")
+    print(f"Zero-shot EM:    {zs_em:.4f}")
+    print(f"Zero-shot CodeBLEU: {zs_codebleu:.4f}")
+
+    # Save predictions
+    with open("rag_predictions.json", "w") as f:
+        json.dump(rag_preds, f, indent=2)
+
+    with open("zero_shot_predictions.json", "w") as f:
+        json.dump(zs_preds, f, indent=2)
+
+
 
 if __name__ == "__main__":
     main()

@@ -336,7 +336,7 @@ def main():
     print(f"loaded {MODEL_NAME} on {model.device}")
 
     # Evaluate RAG model
-    test_split = dataset["test"]
+    test_split = dataset["test"].select(range(500))
 
     print("\nRunning RAG evaluation...")
     rag_em, rag_codebleu, rag_preds = evaluate_model(

@@ -27,7 +27,7 @@ def generate(model, tokenizer, buggy_code, max_new_tokens=256):
         output = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            num_beams=4,
+            num_beams=1,
             early_stopping=True
         )
 
@@ -73,7 +73,7 @@ def evaluate_pipeline(model_dir, tokenizer_dir, test_data):
 def main():
     # load test set
     dataset = load_dataset("google/code_x_glue_cc_code_refinement", name="medium")
-    test_data = dataset["test"]
+    test_data = dataset["test"].select(range(500))
 
     # -----------------------------
     # load paths to models

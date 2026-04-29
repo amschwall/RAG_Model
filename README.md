@@ -11,7 +11,7 @@ Next, install the required dependencies within your virtural environment.
 
 Dependencies for training:
 ```bash
-pip install numpy==1.26.4 torch==2.2.0 transformers==4.46.0 sentencepieve=0.1.99 tqdm==4.65
+pip install dataasets torch transformers pickle faiss gensim codebleu
 ```
 NOTE: The dependencies for training were installed directly into the venv via the terminal.
 
